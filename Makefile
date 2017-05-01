@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS=-Wall -g
 BIN=tinyhttpd
-OBJS=main.o
+OBJS=tiny.o request.o tools.o
 
 $(BIN):$(OBJS)
 	$(CC) $(CFLAGS) $^ -o $@
