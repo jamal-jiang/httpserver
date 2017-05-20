@@ -1,16 +1,50 @@
-#include "common.h"
-#include "tools.h"
+//#include "common.h"
 
-/* listen的socket */
-static int listen_sock;
-/* epoll fd */
-static int epoll_fd;
+#include <stdio.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <assert.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <errno.h>
+#include <pthread.h>
+#include <sys/sendfile.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <stdlib.h>
+#include <string.h>
 
-/**
- * 设置 file describe 为非阻塞模式
- * @param fd 文件描述
- * @return 返回0成功，返回-1失败
- */
+#define BUF_SIZE 2048
+#define MAX_PROCESS 10240
+#define MAX_EVENTS 10240
+#define NO_SOCK -1
+#define NO_FILE -1
+#define STATUS_READ_REQUEST 0
+#define STATUS_SEND_RESPONSE_HEADER 1
+#define STATUS_SEND_RESPONSE 2
+
+struct process {
+    int sock;
+    int fd;
+    int read_pos;
+    int write_pos;
+    int total_length;
+    int status;
+    int response_code;
+    char buf[BUF_SIZE];
+};
+
+
+static int listenfd;
+static int epfd;
+static struct epoll_event ev;
+static struct process processes[MAX_PROCESS];
+static int current_processes = 0;
+
 static int make_socket_non_blocking(int fd) {
     int flags, s;
     // 获取当前flag
@@ -31,25 +65,181 @@ static int make_socket_non_blocking(int fd) {
     return 0;
 }
 
+void reset_process(struct process *process) {
+    process->read_pos = 0;
+    process->write_pos = 0;
+}
+
+struct process *find_free_fd_slow() {
+    int i = 0;
+    for (i = 0; i < MAX_PROCESS; i++) {
+        if (processes[i].sock == NO_SOCK) {
+            return &processes[i];
+        }
+    }
+    return NULL;
+}
+
+struct process *find_free_fd(int fd) {
+    if (fd >= 0 && fd < MAX_PROCESS && processes[fd].sock == NO_SOCK) {
+        printf("quick find_free_fd\n");
+        return &processes[fd];
+    } else {
+        return find_free_fd_slow();
+    }
+}
+
+struct process *find_process_by_fd(int fd) {
+    int i = 0;
+    printf("fd: %d\n", fd);
+    printf("fd1: %d\n", processes[fd].sock);
+    if (fd >= 0 && fd < MAX_PROCESS && processes[fd].sock == fd) {
+        printf("quick return\n");
+        return &processes[fd];
+    } else {
+        for (i = 0; i < MAX_PROCESS; i++) {
+            if (fd == processes[i].sock) {
+                return &processes[i];
+            }
+        }
+    }
+}
+
+void cleanup(struct process *process) {
+    int s;
+    if (process->sock != NO_SOCK) {
+        s = close(process->sock);
+        current_processes--;
+        if (s == NO_SOCK) {
+            printf("close sock\n");
+        }
+    }
+    if (process->fd != -1) {
+        s = close(process->fd);
+        if (s == NO_FILE) {
+            printf("fd: %d\n", process->fd);
+            printf("\n");
+            printf("close file\n");
+        }
+    }
+    process->sock = NO_SOCK;
+    reset_process(process);
+}
+
+void init_process() {
+    int i = 0;
+    for (i = 0; i < MAX_PROCESS; i++) {
+        processes[i].sock = NO_SOCK;
+    }
+}
+
+void accept_fd(int fd) {
+    while (1) { // 由于采用了边缘触发模式，这里需要使用循环
+        struct sockaddr in_addr = {0};
+        socklen_t in_addr_len = sizeof(in_addr);
+        int __result;
+        int accp_fd = accept(listenfd, &in_addr, &in_addr_len);
+        if (-1 == accp_fd) {
+            perror("Accept");
+            break;
+        }
+
+        __result = make_socket_non_blocking(accp_fd);
+        if (-1 == __result) {
+            abort();
+        }
+
+        ev.data.fd = accp_fd;
+        ev.events = EPOLLIN | EPOLLET;
+        // 为新accept的 file describe 设置epoll事件
+        __result = epoll_ctl(epfd, EPOLL_CTL_ADD, accp_fd, &ev);
+        if (-1 == __result) {
+            perror("epoll_ctl");
+            abort();
+        }
+
+        printf("accept process\n");
+        struct process *process = find_free_fd(accp_fd);
+        current_processes++;
+        reset_process(process);
+        process->sock = accp_fd;
+        process->fd = NO_FILE;
+        process->status = STATUS_READ_REQUEST;
+    }
+}
+
+void read_request(struct process *process) {
+    int sock = process->sock;
+    char *buf = process->buf;
+    ssize_t count;
+
+    while (1) {
+        count = read(sock, buf + process->read_pos, BUF_SIZE - process->read_pos);
+        printf("count: %d\n", count);
+        if (count == -1) {
+            if (errno != EAGAIN) {
+                printf("read request error\n");
+                return;
+            }
+            else {
+                /* errno == EAGAIN表示读取完毕 */
+                printf("read finish\n");
+                break;
+            }
+        } else if (count == 0) {
+            // 被客户端关闭连接
+            cleanup(process);
+            return;
+        } else if (count > 0) {
+            process->read_pos += count;
+        }
+    }
+
+    int length = process->read_pos;
+    buf[length] = '\0';
+    printf("buf: %d %d %s\n", process->read_pos, sizeof(buf) * sizeof(char), buf);
+    write(process->sock,
+          "HTTP/1.1 200 OK\r\nDate: Mon, 1 Apr 2013 01:01:01 GMT\r\nContent-Type: text/plain\r\nContent-Length: 25\r\n\r\n Hello from Epoll Server",
+          strlen("HTTP/1.1 200 OK\r\nDate: Mon, 1 Apr 2013 01:01:01 GMT\r\nContent-Type: text/plain\r\nContent-Length: 25\r\n\r\n Hello from Epoll Server!"));
+    close(process->sock);
+}
+
+void handle_request(int fd) {
+    // printf("get fd start: %d\n", fd);
+    struct process *process;
+    process = &processes[fd];
+    // printf("get fd: %d %d\n", process->sock, process->status);
+    switch (process->status) {
+        case STATUS_READ_REQUEST:
+            read_request(process);
+            break;
+        case STATUS_SEND_RESPONSE_HEADER:
+            break;
+        case STATUS_SEND_RESPONSE:
+            break;
+        default:
+            break;
+    }
+}
 
 int main(int argc, char **argv) {
-    // long num = 0, sum = 0;
-    int i = 0;
-    // epoll 实例 file describe
-    int epfd = 0;
-    int listenfd = 0;
-    int result = 0;
-    struct epoll_event ev, event[MAX_EVENT];
-    // 绑定的地址
+
+    struct epoll_event event[MAX_EVENTS];
     const char *const local_addr = "0.0.0.0";
     struct sockaddr_in server_addr = {0};
+    int result;
+
+    //memset(server_addr, 0, sizeof(server_addr));
+
+    /* 初始化process */
+    init_process();
 
     listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (-1 == listenfd) {
-        perror("Open listen socket");
+        perror("socket error\n");
         return -1;
     }
-    /* Enable address reuse */
+
     int on = 1;
     // 打开 socket 端口复用, 防止测试的时候出现 Address already in use
     result = setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
@@ -70,7 +260,6 @@ int main(int argc, char **argv) {
     if (-1 == result) {
         return 0;
     }
-
     result = listen(listenfd, 200);
     if (-1 == result) {
         perror("Start listen");
@@ -78,7 +267,7 @@ int main(int argc, char **argv) {
     }
 
     // 创建epoll实例
-    epfd = epoll_create1(0);
+    epfd = epoll_create1(10);
     if (1 == epfd) {
         perror("Create epoll instance");
         return 0;
@@ -88,16 +277,16 @@ int main(int argc, char **argv) {
     ev.events = EPOLLIN | EPOLLET /* 边缘触发选项。 */;
     // 设置epoll的事件
     result = epoll_ctl(epfd, EPOLL_CTL_ADD, listenfd, &ev);
-
     if (-1 == result) {
         perror("Set epoll_ctl");
         return 0;
     }
 
-    for (;;) {
-        int wait_count;
+    while (1) {
+        int wait_count, i = 0;
         // 等待事件
-        wait_count = epoll_wait(epfd, event, MAX_EVENT, -1);
+        wait_count = epoll_wait(epfd, event, MAX_EVENTS, -1);
+        printf("wait_count: %d\n", wait_count);
 
         for (i = 0; i < wait_count; i++) {
             uint32_t events = event[i].events;
@@ -113,73 +302,11 @@ int main(int argc, char **argv) {
                 close(event[i].data.fd);
                 continue;
             } else if (listenfd == event[i].data.fd) {
-                // listen的 file describe 事件触发， accpet事件
-
-                for (;;) { // 由于采用了边缘触发模式，这里需要使用循环
-                    struct sockaddr in_addr = {0};
-                    socklen_t in_addr_len = sizeof(in_addr);
-                    int accp_fd = accept(listenfd, &in_addr, &in_addr_len);
-                    if (-1 == accp_fd) {
-                        perror("Accept");
-                        break;
-                    }
-                    __result = getnameinfo(&in_addr, sizeof(in_addr),
-                                           host_buf, sizeof(host_buf) / sizeof(host_buf[0]),
-                                           port_buf, sizeof(port_buf) / sizeof(port_buf[0]),
-                                           NI_NUMERICHOST | NI_NUMERICSERV);
-
-                    if (!__result) {
-                        printf("New connection: host = %s, port = %s\n", host_buf, port_buf);
-                    }
-
-                    __result = make_socket_non_blocking(accp_fd);
-                    if (-1 == __result) {
-                        return 0;
-                    }
-
-                    ev.data.fd = accp_fd;
-                    ev.events = EPOLLIN | EPOLLET;
-                    // 为新accept的 file describe 设置epoll事件
-                    __result = epoll_ctl(epfd, EPOLL_CTL_ADD, accp_fd, &ev);
-
-                    if (-1 == __result) {
-                        perror("epoll_ctl");
-                        return 0;
-                    }
-                }
-                continue;
+                accept_fd(listenfd);
             } else {
-                // 其余事件为 file describe 可以读取
-                int done = 0;
-                // 因为采用边缘触发，所以这里需要使用循环。如果不使用循环，程序并不能完全读取到缓存区里面的数据。
-                for (;;) {
-                    ssize_t result_len = 0;
-                    char buf[READ_BUF_LEN] = {0};
-                    result_len = read(event[i].data.fd, buf, sizeof(buf) / sizeof(buf[0]));
-                    if (-1 == result_len) {
-                        if (EAGAIN != errno) {
-                            perror("Read data");
-                            done = 1;
-                        }
-                        break;
-                    } else if (!result_len) {
-                        done = 1;
-                        break;
-                    }
-                }
-
-                int filefd = open("index.html", O_RDONLY);
-                printf("filefd: %d\n", filefd);
-                struct stat stat_buf;
-                fstat(filefd, &stat_buf);
-                sendfile(event[i].data.fd, filefd, NULL, stat_buf.st_size);
-                if (done) {
-                    printf("Closed connection\n");
-                    close(event[i].data.fd);
-                }
+                handle_request(event[i].data.fd);
             }
         }
-
     }
     close(epfd);
     return 0;
