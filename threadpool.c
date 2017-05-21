@@ -100,13 +100,13 @@ int pool_destroy() {
 
 
 void *thread_routine(void *arg) {
-    printf("starting thread 0x%x\n", pthread_self());
+    // printf("starting thread 0x%x\n", pthread_self());
     while (1) {
         pthread_mutex_lock(&(pool->queue_lock));
         /*如果等待队列为0并且不销毁线程池，则处于阻塞状态; 注意
         pthread_cond_wait是一个原子操作，等待前会解锁，唤醒后会加锁*/
         while (pool->cur_queue_size == 0 && !pool->shutdown) {
-            printf("thread 0x%x is waiting\n", pthread_self());
+            // printf("thread 0x%x is waiting\n", pthread_self());
             pthread_cond_wait(&(pool->queue_ready), &(pool->queue_lock));
         }
 
@@ -114,11 +114,11 @@ void *thread_routine(void *arg) {
         if (pool->shutdown) {
             /*遇到break,continue,return等跳转语句，千万不要忘记先解锁*/
             pthread_mutex_unlock(&(pool->queue_lock));
-            printf("thread 0x%x will exit\n", pthread_self());
+            // printf("thread 0x%x will exit\n", pthread_self());
             pthread_exit(NULL);
         }
 
-        printf("thread 0x%x is starting to work\n", pthread_self());
+        // printf("thread 0x%x is starting to work\n", pthread_self());
 
         /*assert是调试的好帮手*/
         assert (pool->cur_queue_size != 0);
@@ -140,7 +140,7 @@ void *thread_routine(void *arg) {
 }
 
 void *myprocess(void *arg) {
-    printf("threadid is 0x%x, working on task %d\n", pthread_self(), *(int *) arg);
+    // printf("threadid is 0x%x, working on task %d\n", pthread_self(), *(int *) arg);
     sleep(1);/*休息一秒，延长任务的执行时间*/
     return NULL;
 }
