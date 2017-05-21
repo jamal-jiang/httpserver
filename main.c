@@ -1,22 +1,4 @@
-//#include "common.h"
-
-#include <stdio.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <assert.h>
-#include <sys/epoll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <netdb.h>
-#include <errno.h>
-#include <pthread.h>
-#include <sys/sendfile.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <stdlib.h>
-#include <string.h>
+#include "common.h"
 
 #define BUF_SIZE 2048
 #define MAX_PROCESS 10240
@@ -199,8 +181,8 @@ void read_request(struct process *process) {
     buf[length] = '\0';
     printf("buf: %d %d %s\n", process->read_pos, sizeof(buf) * sizeof(char), buf);
     write(process->sock,
-          "HTTP/1.1 200 OK\r\nDate: Mon, 1 Apr 2013 01:01:01 GMT\r\nContent-Type: text/plain\r\nContent-Length: 25\r\n\r\n Hello from Epoll Server",
-          strlen("HTTP/1.1 200 OK\r\nDate: Mon, 1 Apr 2013 01:01:01 GMT\r\nContent-Type: text/plain\r\nContent-Length: 25\r\n\r\n Hello from Epoll Server!"));
+          "HTTP/1.1 200 OK\r\nDate: Mon, 1 Apr 2013 01:01:01 GMT\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 25\r\n\r\n Hello from Epoll Server",
+          strlen("HTTP/1.1 200 OK\r\nDate: Mon, 1 Apr 2013 01:01:01 GMT\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 25\r\n\r\n Hello from Epoll Server!"));
     close(process->sock);
 }
 
@@ -267,8 +249,9 @@ int main(int argc, char **argv) {
     }
 
     // 创建epoll实例
-    epfd = epoll_create1(10);
-    if (1 == epfd) {
+    epfd = epoll_create1(0);
+    printf("%d %d\n", epfd, listenfd);
+    if (-1 == epfd) {
         perror("Create epoll instance");
         return 0;
     }
